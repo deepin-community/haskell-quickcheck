@@ -27,13 +27,39 @@ instance Read QCGen where
   readsPrec n xs = [(QCGen g, ys) | (g, ys) <- readsPrec n xs]
 
 instance RandomGen QCGen where
+#ifdef NO_SPLITMIX
   split (QCGen g) =
     case split g of
       (g1, g2) -> (QCGen g1, QCGen g2)
   genRange (QCGen g) = genRange g
-  next (QCGen g) =
-    case next g of
-      (x, g') -> (x, QCGen g')
+  next = wrapQCGen next
+#else
+  split (QCGen g) =
+    case splitSMGen g of
+      (g1, g2) -> (QCGen g1, QCGen g2)
+  genRange _ = (minBound, maxBound)
+  next = wrapQCGen nextInt
+
+#ifndef OLD_RANDOM
+  genWord8 = wrapQCGen genWord8
+  genWord16 = wrapQCGen genWord16
+  genWord32 = wrapQCGen genWord32
+  genWord64 = wrapQCGen genWord64
+  genWord32R r = wrapQCGen (genWord32R r)
+  genWord64R r = wrapQCGen (genWord64R r)
+  genShortByteString n = wrapQCGen (genShortByteString n)
+#endif
+#endif
+
+{-# INLINE wrapQCGen #-}
+#ifdef NO_SPLITMIX
+wrapQCGen :: (StdGen -> (a, StdGen)) -> (QCGen -> (a, QCGen))
+#else
+wrapQCGen :: (SMGen -> (a, SMGen)) -> (QCGen -> (a, QCGen))
+#endif
+wrapQCGen f (QCGen g) =
+  case f g of
+    (x, g') -> (x, QCGen g')
 
 newQCGen :: IO QCGen
 #ifdef NO_SPLITMIX

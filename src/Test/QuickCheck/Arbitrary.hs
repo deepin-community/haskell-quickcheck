@@ -55,6 +55,8 @@ module Test.QuickCheck.Arbitrary
   , arbitraryPrintableChar -- :: Gen Char
   -- ** Helper functions for implementing shrink
 #ifndef NO_GENERICS
+  , RecursivelyShrink
+  , GSubterms
   , genericShrink      -- :: (Generic a, Arbitrary a, RecursivelyShrink (Rep a), GSubterms (Rep a) a) => a -> [a]
   , subterms           -- :: (Generic a, Arbitrary a, GSubterms (Rep a) a) => a -> [a]
   , recursivelyShrink  -- :: (Generic a, RecursivelyShrink (Rep a)) => a -> [a]
@@ -157,6 +159,8 @@ import qualified Data.Map as Map
 import qualified Data.IntSet as IntSet
 import qualified Data.IntMap as IntMap
 import qualified Data.Sequence as Sequence
+import qualified Data.Tree as Tree
+import Data.Bits
 
 import qualified Data.Monoid as Monoid
 
@@ -412,7 +416,7 @@ instance Arbitrary () where
   arbitrary = return ()
 
 instance Arbitrary Bool where
-  arbitrary = choose (False,True)
+  arbitrary = chooseEnum (False,True)
   shrink True = [False]
   shrink False = []
 
@@ -485,7 +489,11 @@ instance Integral a => Arbitrary (Ratio a) where
   arbitrary = arbitrarySizedFractional
   shrink    = shrinkRealFrac
 
+#if defined(MIN_VERSION_base) && MIN_VERSION_base(4,4,0)
+instance Arbitrary a => Arbitrary (Complex a) where
+#else
 instance (RealFloat a, Arbitrary a) => Arbitrary (Complex a) where
+#endif
   arbitrary = liftM2 (:+) arbitrary arbitrary
   shrink (x :+ y) = [ x' :+ y | x' <- shrink x ] ++
                     [ x :+ y' | y' <- shrink y ]
@@ -634,7 +642,7 @@ instance Arbitrary Int64 where
   shrink    = shrinkIntegral
 
 instance Arbitrary Word where
-  arbitrary = arbitrarySizedIntegral
+  arbitrary = arbitrarySizedNatural
   shrink    = shrinkIntegral
 
 instance Arbitrary Word8 where
@@ -814,6 +822,35 @@ instance Arbitrary1 Sequence.Seq where
 instance Arbitrary a => Arbitrary (Sequence.Seq a) where
   arbitrary = arbitrary1
   shrink = shrink1
+instance Arbitrary1 Tree.Tree where
+    liftArbitrary arb = sized $ \n -> do
+        k <- chooseInt (0, n)
+        go k
+      where
+        go n = do -- n is the size of the trees.
+            value <- arb
+            pars <- arbPartition (n - 1) -- can go negative!
+            forest <- mapM go pars
+            return $ Tree.Node value forest
+
+        arbPartition :: Int -> Gen [Int]
+        arbPartition k = case compare k 1 of
+            LT -> pure []
+            EQ -> pure [1]
+            GT -> do
+                first <- chooseInt (1, k)
+                rest <- arbPartition $ k - first
+                shuffle (first : rest)
+
+    liftShrink shr = go
+      where
+        go (Tree.Node val forest) = forest ++
+            [ Tree.Node e fs
+            | (e, fs) <- liftShrink2 shr (liftShrink go) (val, forest)
+            ]
+instance Arbitrary a => Arbitrary (Tree.Tree a) where
+  arbitrary = arbitrary1
+  shrink = shrink1
 
 -- Arbitrary instance for Ziplist
 instance Arbitrary1 ZipList where
@@ -926,7 +963,7 @@ instance Arbitrary (f a) => Arbitrary (Monoid.Alt f a) where
 -- | Generates 'Version' with non-empty non-negative @versionBranch@, and empty @versionTags@
 instance Arbitrary Version where
   arbitrary = sized $ \n ->
-    do k <- choose (0, log2 n)
+    do k <- chooseInt (0, log2 n)
        xs <- vectorOf (k+1) arbitrarySizedNatural
        return (Version xs [])
     where
@@ -975,17 +1012,17 @@ applyArbitrary4 f = applyArbitrary3 (uncurry f)
 arbitrarySizedIntegral :: Integral a => Gen a
 arbitrarySizedIntegral =
   sized $ \n ->
-  inBounds fromInteger (choose (-toInteger n, toInteger n))
+  inBounds fromIntegral (chooseInt (-n, n))
 
 -- | Generates a natural number. The number's maximum value depends on
 -- the size parameter.
 arbitrarySizedNatural :: Integral a => Gen a
 arbitrarySizedNatural =
   sized $ \n ->
-  inBounds fromInteger (choose (0, toInteger n))
+  inBounds fromIntegral (chooseInt (0, n))
 
-inBounds :: Integral a => (Integer -> a) -> Gen Integer -> Gen a
-inBounds fi g = fmap fi (g `suchThat` (\x -> toInteger (fi x) == x))
+inBounds :: Integral a => (Int -> a) -> Gen Int -> Gen a
+inBounds fi g = fmap fi (g `suchThat` (\x -> toInteger x == toInteger (fi x)))
 
 -- | Generates a fractional number. The number can be positive or negative
 -- and its maximum absolute value depends on the size parameter.
@@ -993,14 +1030,15 @@ arbitrarySizedFractional :: Fractional a => Gen a
 arbitrarySizedFractional =
   sized $ \n ->
     let n' = toInteger n in
-      do b <- choose (1, precision)
-         a <- choose ((-n') * b, n' * b)
+      do b <- chooseInteger (1, precision)
+         a <- chooseInteger ((-n') * b, n' * b)
          return (fromRational (a % b))
  where
   precision = 9999999999999 :: Integer
 
 -- Useful for getting at minBound and maxBound without having to
 -- fiddle around with asTypeOf.
+{-# INLINE withBounds #-}
 withBounds :: Bounded a => (a -> a -> Gen a) -> Gen a
 withBounds k = k minBound maxBound
 
@@ -1008,10 +1046,7 @@ withBounds k = k minBound maxBound
 -- the entire range of the type. You may want to use
 -- 'arbitrarySizedBoundedIntegral' instead.
 arbitraryBoundedIntegral :: (Bounded a, Integral a) => Gen a
-arbitraryBoundedIntegral =
-  withBounds $ \mn mx ->
-  do n <- choose (toInteger mn, toInteger mx)
-     return (fromInteger n)
+arbitraryBoundedIntegral = chooseBoundedIntegral (minBound, maxBound)
 
 -- | Generates an element of a bounded type. The element is
 -- chosen from the entire range of the type.
@@ -1020,44 +1055,52 @@ arbitraryBoundedRandom = choose (minBound,maxBound)
 
 -- | Generates an element of a bounded enumeration.
 arbitraryBoundedEnum :: (Bounded a, Enum a) => Gen a
-arbitraryBoundedEnum =
-  withBounds $ \mn mx ->
-  do n <- choose (fromEnum mn, fromEnum mx)
-     return (toEnum n)
+arbitraryBoundedEnum = chooseEnum (minBound, maxBound)
 
 -- | Generates an integral number from a bounded domain. The number is
 -- chosen from the entire range of the type, but small numbers are
 -- generated more often than big numbers. Inspired by demands from
 -- Phil Wadler.
 arbitrarySizedBoundedIntegral :: (Bounded a, Integral a) => Gen a
+-- INLINEABLE so that this combinator gets specialised at each type,
+-- which means that the constant 'bits' in the let-block below will
+-- only be computed once.
+{-# INLINEABLE arbitrarySizedBoundedIntegral #-}
 arbitrarySizedBoundedIntegral =
   withBounds $ \mn mx ->
-  sized $ \s ->
-    do let bits n | n == 0 = 0
-                  | otherwise = 1 + bits (n `quot` 2)
-           k = (toInteger s*(bits mn `max` bits mx `max` 40) `div` 80)
-           -- computes x `min` (2^k), but avoids computing 2^k
-           -- if it is too large
-           x `minexp` k
-             | bits x < k = x
-             | otherwise = x `min` (2^k)
-           -- x `max` (-2^k)
-           x `maxexpneg` k = -((-x) `minexp` k)
-       n <- choose (toInteger mn `maxexpneg` k, toInteger mx `minexp` k)
-       return (fromInteger n)
+  let ilog2 1 = 0
+      ilog2 n | n > 0 = 1 + ilog2 (n `div` 2)
+
+      -- How many bits are needed to represent this type?
+      -- (This number is an upper bound, not exact.)
+      bits = ilog2 (toInteger mx - toInteger mn + 1) in
+  sized $ \k ->
+    let
+      -- Reach maximum size by k=80, or quicker for small integer types
+      power = ((bits `max` 40) * k) `div` 80
+
+      -- Bounds should be 2^power, but:
+      --   * clamp the result to minBound/maxBound
+      --   * clamp power to 'bits', in case k is a huge number
+      lo = toInteger mn `max` (-1 `shiftL` (power `min` bits))
+      hi = toInteger mx `min` (1 `shiftL` (power `min` bits)) in
+    fmap fromInteger (chooseInteger (lo, hi))
 
 -- ** Generators for various kinds of character
 
 -- | Generates any Unicode character (but not a surrogate)
 arbitraryUnicodeChar :: Gen Char
 arbitraryUnicodeChar =
-  arbitraryBoundedEnum `suchThat` (not . isSurrogate)
+  arbitraryBoundedEnum `suchThat` isValidUnicode
   where
-    isSurrogate c = generalCategory c == Surrogate
+    isValidUnicode c = case generalCategory c of
+      Surrogate -> False
+      NotAssigned -> False
+      _ -> True
 
 -- | Generates a random ASCII character (0-127).
 arbitraryASCIIChar :: Gen Char
-arbitraryASCIIChar = choose ('\0', '\127')
+arbitraryASCIIChar = chooseEnum ('\0', '\127')
 
 -- | Generates a printable Unicode character.
 arbitraryPrintableChar :: Gen Char
@@ -1131,7 +1174,7 @@ shrinkRealFrac x
 shrinkDecimal :: RealFrac a => a -> [a]
 shrinkDecimal x
   | not (x == x)  = 0 : take 10 (iterate (*2) 0)        -- NaN
-  | not (2*x+1>x) = 0 : takeWhile (<x) (iterate (*2) 0) -- infinity
+  | not (2*abs x+1>abs x) = 0 : takeWhile (<x) (iterate (*2) 0) -- infinity
   | otherwise =
     -- e.g. shrink pi =
     --   shrink 3 ++ map (/ 10) (shrink 31) ++
@@ -1140,7 +1183,7 @@ shrinkDecimal x
     [ y
     | precision <- take 6 (iterate (*10) 1),
       let m = round (toRational x * precision),
-      m `mod` 10 /= 0, -- don't allow shrinking to increase digits
+      precision == 1 || m `mod` 10 /= 0, -- don't allow shrinking to increase digits
       n <- m:shrink m,
       let y = fromRational (fromInteger n / precision),
       abs y < abs x ]
@@ -1255,7 +1298,11 @@ instance HasResolution a => CoArbitrary (Fixed a) where
   coarbitrary = coarbitraryReal
 #endif
 
+#if defined(MIN_VERSION_base) && MIN_VERSION_base(4,4,0)
+instance CoArbitrary a => CoArbitrary (Complex a) where
+#else
 instance (RealFloat a, CoArbitrary a) => CoArbitrary (Complex a) where
+#endif
   coarbitrary (x :+ y) = coarbitrary x . coarbitrary y
 
 instance (CoArbitrary a, CoArbitrary b)
@@ -1343,6 +1390,8 @@ instance CoArbitrary a => CoArbitrary (IntMap.IntMap a) where
   coarbitrary = coarbitrary . IntMap.toList
 instance CoArbitrary a => CoArbitrary (Sequence.Seq a) where
   coarbitrary = coarbitrary . toList
+instance CoArbitrary a => CoArbitrary (Tree.Tree a) where
+  coarbitrary (Tree.Node val forest) = coarbitrary val . coarbitrary forest
 
 -- CoArbitrary instance for Ziplist
 instance CoArbitrary a => CoArbitrary (ZipList a) where
