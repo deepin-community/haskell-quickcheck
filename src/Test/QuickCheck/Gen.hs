@@ -35,6 +35,13 @@ import Test.QuickCheck.Random
 import Data.List
 import Data.Ord
 import Data.Maybe
+#ifndef NO_SPLITMIX
+import System.Random.SplitMix(bitmaskWithRejection64', SMGen, nextInteger)
+#endif
+import Data.Word
+import Data.Int
+import Data.Bits
+import Control.Applicative
 
 --------------------------------------------------------------------------
 -- ** Generator type
@@ -56,12 +63,18 @@ instance Functor Gen where
     MkGen (\r n -> f (h r n))
 
 instance Applicative Gen where
-  pure  = return
-  gf <*> gx = gf >>= \f -> fmap f gx
+  pure x =
+    MkGen (\_ _ -> x)
+  (<*>) = ap
+
+#ifndef NO_EXTRA_METHODS_IN_APPLICATIVE
+  -- We don't need to split the seed for these.
+  _ *> m = m
+  m <* _ = m
+#endif
 
 instance Monad Gen where
-  return x =
-    MkGen (\_ _ -> x)
+  return = pure
 
   MkGen m >>= k =
     MkGen (\r n ->
@@ -70,6 +83,8 @@ instance Monad Gen where
           let MkGen m' = k (m r1 n)
           in m' r2 n
     )
+
+  (>>) = (*>)
 
 instance MonadFix Gen where
   mfix f =
@@ -126,12 +141,85 @@ scale :: (Int -> Int) -> Gen a -> Gen a
 scale f g = sized (\n -> resize (f n) g)
 
 -- | Generates a random element in the given inclusive range.
+-- For integral and enumerated types, the specialised variants of
+-- 'choose' below run much quicker.
 choose :: Random a => (a,a) -> Gen a
 choose rng = MkGen (\r _ -> let (x,_) = randomR rng r in x)
 
 -- | Generates a random element over the natural range of `a`.
 chooseAny :: Random a => Gen a
 chooseAny = MkGen (\r _ -> let (x,_) = random r in x)
+
+-- | A fast implementation of 'choose' for enumerated types.
+chooseEnum :: Enum a => (a, a) -> Gen a
+chooseEnum (lo, hi) =
+  fmap toEnum (chooseInt (fromEnum lo, fromEnum hi))
+
+-- | A fast implementation of 'choose' for 'Int'.
+chooseInt :: (Int, Int) -> Gen Int
+chooseInt = chooseBoundedIntegral
+
+-- Note about INLINEABLE: we specialise chooseBoundedIntegral
+-- for each concrete type, so that all the bounds checks get
+-- simplified away.
+{-# INLINEABLE chooseBoundedIntegral #-}
+-- | A fast implementation of 'choose' for bounded integral types.
+chooseBoundedIntegral :: (Bounded a, Integral a) => (a, a) -> Gen a
+chooseBoundedIntegral (lo, hi)
+#ifndef NO_SPLITMIX
+  | toInteger mn >= toInteger (minBound :: Int64) &&
+    toInteger mx <= toInteger (maxBound :: Int64) =
+      fmap fromIntegral (chooseInt64 (fromIntegral lo, fromIntegral hi))
+  | toInteger mn >= toInteger (minBound :: Word64) &&
+    toInteger mx <= toInteger (maxBound :: Word64) =
+      fmap fromIntegral (chooseWord64 (fromIntegral lo, fromIntegral hi))
+#endif
+  | otherwise =
+      fmap fromInteger (chooseInteger (toInteger lo, toInteger hi))
+#ifndef NO_SPLITMIX
+  where
+    mn = minBound `asTypeOf` lo
+    mx = maxBound `asTypeOf` hi
+#endif
+
+-- | A fast implementation of 'choose' for 'Integer'.
+chooseInteger :: (Integer, Integer) -> Gen Integer
+#ifdef NO_SPLITMIX
+chooseInteger = choose
+#else
+chooseInteger (lo, hi)
+  | lo >= toInteger (minBound :: Int64) && lo <= toInteger (maxBound :: Int64) &&
+    hi >= toInteger (minBound :: Int64) && hi <= toInteger (maxBound :: Int64) =
+    fmap toInteger (chooseInt64 (fromInteger lo, fromInteger hi))
+  | lo >= toInteger (minBound :: Word64) && lo <= toInteger (maxBound :: Word64) &&
+    hi >= toInteger (minBound :: Word64) && hi <= toInteger (maxBound :: Word64) =
+    fmap toInteger (chooseWord64 (fromInteger lo, fromInteger hi))
+  | otherwise = MkGen $ \(QCGen g) _ -> fst (nextInteger lo hi g)
+
+chooseWord64 :: (Word64, Word64) -> Gen Word64
+chooseWord64 (lo, hi)
+  | lo <= hi = chooseWord64' (lo, hi)
+  | otherwise = chooseWord64' (hi, lo)
+  where
+    chooseWord64' :: (Word64, Word64) -> Gen Word64
+    chooseWord64' (lo, hi) =
+      fmap (+ lo) (chooseUpTo (hi - lo))
+
+chooseInt64 :: (Int64, Int64) -> Gen Int64
+chooseInt64 (lo, hi)
+  | lo <= hi = chooseInt64' (lo, hi)
+  | otherwise = chooseInt64' (hi, lo)
+  where
+    chooseInt64' :: (Int64, Int64) -> Gen Int64
+    chooseInt64' (lo, hi) = do
+      w <- chooseUpTo (fromIntegral hi - fromIntegral lo)
+      return (fromIntegral (w + fromIntegral lo))
+
+chooseUpTo :: Word64 -> Gen Word64
+chooseUpTo n =
+  MkGen $ \(QCGen g) _ ->
+    fst (bitmaskWithRejection64' n g)
+#endif
 
 -- | Run a generator. The size passed to the generator is always 30;
 -- if you want another size then you should explicitly use 'resize'.
@@ -183,7 +271,7 @@ gen `suchThatMaybe` p = sized (\n -> try n (2*n))
 -- must be non-empty.
 oneof :: [Gen a] -> Gen a
 oneof [] = error "QuickCheck.oneof used with empty list"
-oneof gs = choose (0,length gs - 1) >>= (gs !!)
+oneof gs = chooseInt (0,length gs - 1) >>= (gs !!)
 
 -- | Chooses one of the given generators, with a weighted random distribution.
 -- The input list must be non-empty.
@@ -194,7 +282,7 @@ frequency xs
     error "QuickCheck.frequency: negative weight"
   | all (== 0) (map fst xs) =
     error "QuickCheck.frequency: all weights were zero"
-frequency xs0 = choose (1, tot) >>= (`pick` xs0)
+frequency xs0 = chooseInt (1, tot) >>= (`pick` xs0)
  where
   tot = sum (map fst xs0)
 
@@ -206,16 +294,16 @@ frequency xs0 = choose (1, tot) >>= (`pick` xs0)
 -- | Generates one of the given values. The input list must be non-empty.
 elements :: [a] -> Gen a
 elements [] = error "QuickCheck.elements used with empty list"
-elements xs = (xs !!) `fmap` choose (0, length xs - 1)
+elements xs = (xs !!) `fmap` chooseInt (0, length xs - 1)
 
 -- | Generates a random subsequence of the given list.
 sublistOf :: [a] -> Gen [a]
-sublistOf xs = filterM (\_ -> choose (False, True)) xs
+sublistOf xs = filterM (\_ -> chooseEnum (False, True)) xs
 
 -- | Generates a random permutation of the given list.
 shuffle :: [a] -> Gen [a]
 shuffle xs = do
-  ns <- vectorOf (length xs) (choose (minBound :: Int, maxBound))
+  ns <- vectorOf (length xs) (chooseInt (minBound :: Int, maxBound))
   return (map snd (sortBy (comparing fst) (zip ns xs)))
 
 -- | Takes a list of elements of increasing size, and chooses
@@ -242,14 +330,14 @@ growingElements xs = sized $ \n -> elements (take (1 `max` (n * k `div` 100)) xs
 -- size parameter.
 listOf :: Gen a -> Gen [a]
 listOf gen = sized $ \n ->
-  do k <- choose (0,n)
+  do k <- chooseInt (0,n)
      vectorOf k gen
 
 -- | Generates a non-empty list of random length. The maximum length
 -- depends on the size parameter.
 listOf1 :: Gen a -> Gen [a]
 listOf1 gen = sized $ \n ->
-  do k <- choose (1,1 `max` n)
+  do k <- chooseInt (1,1 `max` n)
      vectorOf k gen
 
 -- | Generates a list of the given length.

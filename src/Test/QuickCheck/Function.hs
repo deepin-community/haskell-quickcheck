@@ -49,6 +49,9 @@ module Test.QuickCheck.Function
   , functionRealFrac
   , functionBoundedEnum
   , functionVoid
+  , functionMapWith
+  , functionEitherWith
+  , functionPairWith
 #if defined(__GLASGOW_HASKELL__) && __GLASGOW_HASKELL__ >= 708
   , pattern Fn
   , pattern Fn2
@@ -73,6 +76,7 @@ import qualified Data.IntSet as IntSet
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Data.Sequence as Sequence
+import qualified Data.Tree as Tree
 import Data.Int
 import Data.Complex
 import Data.Foldable(toList)
@@ -188,6 +192,7 @@ functionVoid _ = Nil
 functionMap :: Function b => (a->b) -> (b->a) -> (a->c) -> (a:->c)
 functionMap = functionMapWith function
 
+-- | @since 2.13.3
 functionMapWith :: ((b->c) -> (b:->c)) -> (a->b) -> (b->a) -> (a->c) -> (a:->c)
 functionMapWith function g h f = Map g h (function (\b -> f (h b)))
 
@@ -203,12 +208,14 @@ instance Function a => Function (Identity a) where
 instance (Function a, Function b) => Function (a,b) where
   function = functionPairWith function function
 
+-- | @since 2.13.3
 functionPairWith :: ((a->b->c) -> (a:->(b->c))) -> ((b->c) -> (b:->c)) -> ((a,b)->c) -> ((a,b):->c)
 functionPairWith func1 func2 f = Pair (func2 `fmap` func1 (curry f))
 
 instance (Function a, Function b) => Function (Either a b) where
   function = functionEitherWith function function
 
+-- | @since 2.13.3
 functionEitherWith :: ((a->c) -> (a:->c)) -> ((b->c) -> (b:->c)) -> (Either a b->c) -> (Either a b:->c)
 functionEitherWith func1 func2 f = func1 (f . Left) :+: func2 (f . Right)
 
@@ -332,6 +339,9 @@ instance Function a => Function (IntMap.IntMap a) where
 
 instance Function a => Function (Sequence.Seq a) where
   function = functionMap toList Sequence.fromList
+
+instance Function a => Function (Tree.Tree a) where
+  function = functionMap (\(Tree.Node x xs) -> (x,xs)) (uncurry Tree.Node)
 
 instance Function Int8 where
   function = functionBoundedEnum
