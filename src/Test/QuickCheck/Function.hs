@@ -48,6 +48,7 @@ module Test.QuickCheck.Function
   , functionIntegral
   , functionRealFrac
   , functionBoundedEnum
+  , functionElements
   , functionVoid
   , functionMapWith
   , functionEitherWith
@@ -82,6 +83,15 @@ import Data.Complex
 import Data.Foldable(toList)
 import Data.Functor.Identity
 import qualified Data.Monoid as Monoid
+
+#if defined(MIN_VERSION_base)
+#if MIN_VERSION_base(4,2,0)
+import System.IO
+  ( Newline(..)
+  , NewlineMode(..)
+  )
+#endif
+#endif
 
 #ifndef NO_FIXED
 import Data.Fixed
@@ -165,7 +175,11 @@ class Function a where
 -- Use only for small types (i.e. not integers): creates
 -- the list @['minBound'..'maxBound']@!
 functionBoundedEnum :: (Eq a, Bounded a, Enum a) => (a->b) -> (a:->b)
-functionBoundedEnum f = Table [(x,f x) | x <- [minBound..maxBound]]
+functionBoundedEnum = functionElements [minBound..maxBound]
+
+-- | Provides a 'Function' instance for small finite types.
+functionElements :: Eq a => [a] ->  (a->b) -> (a:->b)
+functionElements xs f = Table [(x,f x) | x <- xs]
 
 -- | Provides a 'Function' instance for types with 'RealFrac'.
 functionRealFrac :: RealFrac a => (a->b) -> (a:->b)
@@ -367,6 +381,25 @@ instance Function Word32 where
 instance Function Word64 where
   function = functionIntegral
 
+#if defined(MIN_VERSION_base)
+#if MIN_VERSION_base(4,2,0)
+instance Function Newline where
+  function = functionMap g h
+    where
+      g LF = False
+      g CRLF = True
+
+      h False = LF
+      h True = CRLF
+
+instance Function NewlineMode where
+  function = functionMap g h
+    where
+      g (NewlineMode inNL outNL) = (inNL,outNL)
+      h (inNL,outNL) = NewlineMode inNL outNL
+#endif
+#endif
+
 -- instances for Data.Monoid newtypes
 
 instance Function a => Function (Monoid.Dual a) where
@@ -525,6 +558,9 @@ instance Functor (Fun a) where
 pattern Fn :: (a -> b) -> Fun a b
 #endif
 pattern Fn f <- (applyFun -> f)
+#if __GLASGOW_HASKELL__ >= 802
+{-# COMPLETE Fn #-}
+#endif
 
 -- | A modifier for testing binary functions.
 --
@@ -534,12 +570,18 @@ pattern Fn f <- (applyFun -> f)
 pattern Fn2 :: (a -> b -> c) -> Fun (a, b) c
 #endif
 pattern Fn2 f <- (applyFun2 -> f)
+#if __GLASGOW_HASKELL__ >= 802
+{-# COMPLETE Fn2 #-}
+#endif
 
 -- | A modifier for testing ternary functions.
 #if __GLASGOW_HASKELL__ >= 800
 pattern Fn3 :: (a -> b -> c -> d) -> Fun (a, b, c) d
 #endif
 pattern Fn3 f <- (applyFun3 -> f)
+#if __GLASGOW_HASKELL__ >= 802
+{-# COMPLETE Fn3 #-}
+#endif
 #endif
 
 mkFun :: (a :-> b) -> b -> Fun a b

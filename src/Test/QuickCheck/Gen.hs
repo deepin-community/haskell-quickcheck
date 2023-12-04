@@ -2,6 +2,9 @@
 #ifndef NO_ST_MONAD
 {-# LANGUAGE Rank2Types #-}
 #endif
+#ifndef NO_SAFE_HASKELL
+{-# LANGUAGE Safe #-}
+#endif
 -- | Test case generation.
 --
 -- __Note__: the contents of this module (except for the definition of
@@ -32,11 +35,11 @@ import Control.Applicative
   ( Applicative(..) )
 
 import Test.QuickCheck.Random
-import Data.List
+import Data.List (sortBy)
 import Data.Ord
 import Data.Maybe
 #ifndef NO_SPLITMIX
-import System.Random.SplitMix(bitmaskWithRejection64', SMGen, nextInteger)
+import System.Random.SplitMix(bitmaskWithRejection64', nextInteger, nextDouble, nextFloat, SMGen)
 #endif
 import Data.Word
 import Data.Int
@@ -238,6 +241,23 @@ sample :: Show a => Gen a -> IO ()
 sample g =
   do cases <- sample' g
      mapM_ print cases
+
+--------------------------------------------------------------------------
+-- ** Floating point
+
+-- | Generate 'Double' in 0..1 range
+genDouble :: Gen Double
+
+-- | Generate 'Float' in 0..1 range
+genFloat :: Gen Float
+
+#ifndef NO_SPLITMIX
+genDouble = MkGen $ \(QCGen g) _ -> fst (nextDouble g)
+genFloat  = MkGen $ \(QCGen g) _ -> fst (nextFloat g)
+#else
+genDouble = choose (0,1)
+genFloat  = choose (0,1)
+#endif
 
 --------------------------------------------------------------------------
 -- ** Common generator combinators

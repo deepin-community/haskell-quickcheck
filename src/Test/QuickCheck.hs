@@ -81,6 +81,7 @@ module Test.QuickCheck
   , shrinkMapBy
   , shrinkIntegral
   , shrinkRealFrac
+  , shrinkBoundedEnum
   , shrinkDecimal
 
     -- ** Lifting of 'Arbitrary' to unary and binary type constructors
@@ -269,6 +270,7 @@ module Test.QuickCheck
   , noShrinking
   , withMaxSuccess
   , within
+  , discardAfter
   , once
   , again
   , mapSize

@@ -68,6 +68,7 @@ module Test.QuickCheck.Arbitrary
   , shrinkMapBy              -- :: (a -> b) -> (b -> a) -> (a -> [a]) -> b -> [b]
   , shrinkIntegral           -- :: Integral a => a -> [a]
   , shrinkRealFrac           -- :: RealFrac a => a -> [a]
+  , shrinkBoundedEnum        -- :: (Bounded a, Enum a) => a -> [a]
   , shrinkDecimal            -- :: RealFrac a => a -> [a]
   -- ** Helper functions for implementing coarbitrary
   , coarbitraryIntegral      -- :: Integral a => a -> Gen b -> Gen b
@@ -136,6 +137,15 @@ import Data.List
   )
 
 import Data.Version (Version (..))
+
+#if defined(MIN_VERSION_base)
+#if MIN_VERSION_base(4,2,0)
+import System.IO
+  ( Newline(..)
+  , NewlineMode(..)
+  )
+#endif
+#endif
 
 import Control.Monad
   ( liftM
@@ -684,11 +694,55 @@ instance Arbitrary Char where
                 )
 
 instance Arbitrary Float where
-  arbitrary = arbitrarySizedFractional
+  arbitrary = oneof
+    -- generate 0..1 numbers with full precision
+    [ genFloat
+    -- generate integral numbers
+    , fromIntegral <$> (arbitrary :: Gen Int)
+    -- generate fractions with small denominators
+    , smallDenominators
+    -- uniform -size..size with with denominators ~ size
+    , uniform
+    -- and uniform -size..size with higher precision
+    , arbitrarySizedFractional
+    ]
+    where
+      smallDenominators = sized $ \n -> do
+        i <- chooseInt (0, n)
+        pure (fromRational (streamNth i rationalUniverse))
+
+      uniform = sized $ \n -> do
+        let n' = toInteger n
+        b <- chooseInteger (1, max 1 n')
+        a <- chooseInteger ((-n') * b, n' * b)
+        return (fromRational (a % b))
+
   shrink    = shrinkDecimal
 
 instance Arbitrary Double where
-  arbitrary = arbitrarySizedFractional
+  arbitrary = oneof
+    -- generate 0..1 numbers with full precision
+    [ genDouble
+    -- generate integral numbers
+    , fromIntegral <$> (arbitrary :: Gen Int)
+    -- generate fractions with small denominators
+    , smallDenominators
+    -- uniform -size..size with with denominators ~ size
+    , uniform
+    -- and uniform -size..size with higher precision
+    , arbitrarySizedFractional
+    ]
+    where
+      smallDenominators = sized $ \n -> do
+        i <- chooseInt (0, n)
+        pure (fromRational (streamNth i rationalUniverse))
+
+      uniform = sized $ \n -> do
+        let n' = toInteger n
+        b <- chooseInteger (1, max 1 n')
+        a <- chooseInteger ((-n') * b, n' * b)
+        return (fromRational (a % b))
+
   shrink    = shrinkDecimal
 
 instance Arbitrary CChar where
@@ -987,7 +1041,25 @@ instance Arbitrary ExitCode where
   shrink (ExitFailure x) = ExitSuccess : [ ExitFailure x' | x' <- shrink x ]
   shrink _        = []
 
+#if defined(MIN_VERSION_base)
+#if MIN_VERSION_base(4,2,0)
+instance Arbitrary Newline where
+  arbitrary = elements [LF, CRLF]
 
+  -- The behavior of code for LF is generally simpler than for CRLF
+  -- See the documentation for this type, which states that Haskell
+  -- Internally always assumes newlines are \n and this type represents
+  -- how to translate that to and from the outside world, where LF means
+  -- no translation.
+  shrink LF = []
+  shrink CRLF = [LF]
+
+instance Arbitrary NewlineMode where
+  arbitrary = NewlineMode <$> arbitrary <*> arbitrary
+
+  shrink (NewlineMode inNL outNL) = [NewlineMode inNL' outNL' | (inNL', outNL') <- shrink (inNL, outNL)]
+#endif
+#endif
 
 -- ** Helper functions for implementing arbitrary
 
@@ -1024,17 +1096,14 @@ arbitrarySizedNatural =
 inBounds :: Integral a => (Int -> a) -> Gen Int -> Gen a
 inBounds fi g = fmap fi (g `suchThat` (\x -> toInteger x == toInteger (fi x)))
 
--- | Generates a fractional number. The number can be positive or negative
+-- | Uniformly generates a fractional number. The number can be positive or negative
 -- and its maximum absolute value depends on the size parameter.
 arbitrarySizedFractional :: Fractional a => Gen a
 arbitrarySizedFractional =
-  sized $ \n ->
-    let n' = toInteger n in
-      do b <- chooseInteger (1, precision)
-         a <- chooseInteger ((-n') * b, n' * b)
-         return (fromRational (a % b))
- where
-  precision = 9999999999999 :: Integer
+  sized $ \n -> do
+    denom <- chooseInt (1, max 1 n)
+    numer <- chooseInt (-n*denom, n*denom)
+    pure $ fromIntegral numer / fromIntegral denom
 
 -- Useful for getting at minBound and maxBound without having to
 -- fiddle around with asTypeOf.
@@ -1119,7 +1188,7 @@ shrinkNothing _ = []
 -- shrinkOrderedList :: (Ord a, Arbitrary a) => [a] -> [[a]]
 -- shrinkOrderedList = shrinkMap sort id
 --
--- shrinkSet :: (Ord a, Arbitrary a) => Set a -> Set [a]
+-- shrinkSet :: (Ord a, Arbitrary a) => Set a -> [Set a]
 -- shrinkSet = shrinkMap fromList toList
 -- @
 shrinkMap :: Arbitrary a => (a -> b) -> (b -> a) -> b -> [b]
@@ -1147,14 +1216,42 @@ shrinkIntegral x =
             (True,  False) -> a + b < 0
             (False, True)  -> a + b > 0
 
+-- | Shrink an element of a bounded enumeration.
+--
+-- === __Example__
+--
+-- @
+-- data MyEnum = E0 | E1 | E2 | E3 | E4 | E5 | E6 | E7 | E8 | E9
+--    deriving (Bounded, Enum, Eq, Ord, Show)
+-- @
+--
+-- >>> shrinkBoundedEnum E9
+-- [E0,E5,E7,E8]
+--
+-- >>> shrinkBoundedEnum E5
+-- [E0,E3,E4]
+--
+-- >>> shrinkBoundedEnum E0
+-- []
+--
+shrinkBoundedEnum :: (Bounded a, Enum a, Eq a) => a -> [a]
+shrinkBoundedEnum a
+  | a == minBound =
+    []
+  | otherwise =
+    toEnum <$> filter (>= minBoundInt) (shrinkIntegral $ fromEnum a)
+  where
+    minBoundInt :: Int
+    minBoundInt = fromEnum (minBound `asTypeOf` a)
+
 -- | Shrink a fraction, preferring numbers with smaller
 -- numerators or denominators. See also 'shrinkDecimal'.
 shrinkRealFrac :: RealFrac a => a -> [a]
 shrinkRealFrac x
-  | not (x == x)  = 0 : take 10 (iterate (*2) 0) -- NaN
-  | not (2*x+1>x) = 0 : takeWhile (<x) (iterate (*2) 0) -- infinity
+  | not (x == x)  = 0 : takeWhile (< 1000) numbers -- NaN
+  | x > 0 && not (2*x+1>x) = 0 : takeWhile (<x) numbers -- infinity
   | x < 0 = negate x:map negate (shrinkRealFrac (negate x))
-  | otherwise =
+  | otherwise = -- x is finite and >= 0
     -- To ensure termination
     filter (\y -> abs y < abs x) $
       -- Try shrinking to an integer first
@@ -1168,14 +1265,16 @@ shrinkRealFrac x
   where
     num = numerator (toRational x)
     denom = denominator (toRational x)
+    numbers = iterate (*2) 1
 
 -- | Shrink a real number, preferring numbers with shorter
 -- decimal representations. See also 'shrinkRealFrac'.
 shrinkDecimal :: RealFrac a => a -> [a]
 shrinkDecimal x
-  | not (x == x)  = 0 : take 10 (iterate (*2) 0)        -- NaN
-  | not (2*abs x+1>abs x) = 0 : takeWhile (<x) (iterate (*2) 0) -- infinity
-  | otherwise =
+  | not (x == x)  = 0 : takeWhile (< 1000) numbers -- NaN
+  | not (2*abs x+1>abs x) = 0 : takeWhile (<x) numbers -- infinity
+  | x < 0 = negate x:map negate (shrinkDecimal (negate x))
+  | otherwise = -- x is finite and >= 0
     -- e.g. shrink pi =
     --   shrink 3 ++ map (/ 10) (shrink 31) ++
     --   map (/ 100) (shrink 314) + ...,
@@ -1187,6 +1286,9 @@ shrinkDecimal x
       n <- m:shrink m,
       let y = fromRational (fromInteger n / precision),
       abs y < abs x ]
+  where
+    -- 1, 2, 3, ..., 10, 20, 30, ..., 100, 200, 300, etc.
+    numbers = concat $ iterate (map (*10)) (map fromInteger [1..9])
 
 --------------------------------------------------------------------------
 -- ** CoArbitrary
@@ -1447,6 +1549,17 @@ instance CoArbitrary (f a) => CoArbitrary (Monoid.Alt f a) where
 instance CoArbitrary Version where
   coarbitrary (Version a b) = coarbitrary (a, b)
 
+#if defined(MIN_VERSION_base)
+#if MIN_VERSION_base(4,2,0)
+instance CoArbitrary Newline where
+  coarbitrary LF = variant 0
+  coarbitrary CRLF = variant 1
+
+instance CoArbitrary NewlineMode where
+  coarbitrary (NewlineMode inNL outNL) = coarbitrary inNL . coarbitrary outNL
+#endif
+#endif
+
 -- ** Helpers for implementing coarbitrary
 
 -- | A 'coarbitrary' implementation for integral numbers.
@@ -1481,6 +1594,42 @@ orderedList = sort `fmap` arbitrary
 -- | Generates an infinite list.
 infiniteList :: Arbitrary a => Gen [a]
 infiniteList = infiniteListOf arbitrary
+
+
+--------------------------------------------------------------------------
+-- ** Rational helper
+
+infixr 5 :<
+data Stream a = !a :< Stream a
+
+streamNth :: Int -> Stream a -> a
+streamNth n (x :< xs) | n <= 0    = x
+                      | otherwise = streamNth (n - 1) xs
+
+-- We read into this stream only with ~size argument,
+-- so it's ok to have it as CAF.
+--
+rationalUniverse :: Stream Rational
+rationalUniverse = 0 :< 1 :< (-1) :< go leftSideStream
+  where
+    go (x :< xs) =
+      let nx = -x
+          rx = recip x
+          nrx = -rx
+      in nx `seq` rx `seq` nrx `seq` (x :< rx :< nx :< nrx :< go xs)
+
+-- All the rational numbers on the left side of the Calkin-Wilf tree,
+-- in breadth-first order.
+leftSideStream :: Stream Rational
+leftSideStream = (1 % 2) :< go leftSideStream
+  where
+    go (x :< xs) =
+        lChild `seq` rChild `seq`
+        (lChild :< rChild :< go xs)
+      where
+        nd = numerator x + denominator x
+        lChild = numerator x % nd
+        rChild = nd % denominator x
 
 --------------------------------------------------------------------------
 -- the end.

@@ -217,12 +217,12 @@ instance Functor Rose where
   fmap f (MkRose x rs) = MkRose (f x) [ fmap f r | r <- rs ]
 
 instance Applicative Rose where
-  pure = return
+  pure x = MkRose x []
   -- f must be total
   (<*>) = liftM2 ($)
 
 instance Monad Rose where
-  return x = MkRose x []
+  return = pure
   -- k must be total
   m >>= k  = joinRose (fmap k m)
 
@@ -778,7 +778,20 @@ True  ==> p = property p
 --
 -- Bad: @prop_foo a b c = ...; main = quickCheck (within 1000000 prop_foo)@
 within :: Testable prop => Int -> prop -> Property
-within n = mapRoseResult f
+within n = onTimeout
+   (failed { reason = "Timeout of " ++ show n ++ " microseconds exceeded." })
+   n
+
+-- | Discards the test case if it does not complete within the given
+-- number of microseconds. This can be useful when testing algorithms
+-- that have pathological cases where they run extremely slowly.
+discardAfter :: Testable prop => Int -> prop -> Property
+discardAfter n = onTimeout
+   (rejected { reason = "Timeout of " ++ show n ++ " microseconds exceeded." })
+   n
+
+onTimeout :: Testable prop => Result -> Int -> prop -> Property
+onTimeout timeoutResult n = mapRoseResult f
   where
     f rose = ioRose $ do
       let m `orError` x = fmap (fromMaybe x) m
@@ -787,11 +800,11 @@ within n = mapRoseResult f
       res' <- timeout n (protectResult (return res)) `orError`
         timeoutResult
       return (MkRose res' (map f roses))
-
-    timeoutResult = failed { reason = "Timeout of " ++ show n ++ " microseconds exceeded." }
 #ifdef NO_TIMEOUT
     timeout _ = fmap Just
 #endif
+
+
 
 -- | Explicit universal quantification: uses an explicitly given
 -- test case generator.

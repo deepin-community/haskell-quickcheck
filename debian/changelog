@@ -1,3 +1,11 @@
+haskell-quickcheck (2.14.3-1) unstable; urgency=medium
+
+  * Declare compliance with Debian policy 4.6.1
+  * Declare compliance with Debian policy 4.6.2
+  * New upstream release
+
+ -- Ilias Tsitsimpis <iliastsi@debian.org>  Fri, 01 Sep 2023 20:00:07 +0300
+
 haskell-quickcheck (2.14.2-1) unstable; urgency=medium
 
   * New upstream release
